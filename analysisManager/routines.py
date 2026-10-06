@@ -25,7 +25,7 @@ class routine(object):
 		self.name = name
 		self.sampler = sampler
 	
-	def getResultPopulation(self,nLen = None,target = 'tbr'):
+	def getResultPopulation(self,target: str,nLen: int | None = None) -> Population:
 		if not(hasattr(self,'df')):
 			raise AttributeError('No DataFrame found')
 		if nLen:
@@ -34,7 +34,7 @@ class routine(object):
 			else:
 				subdf = self.df.dropna().sort_values(target).iloc[:nLen]
 			initialGuesses = [row.to_dict() for index,row in subdf.iterrows()]
-			initialGuesses = [{key:d[key] for key in sampler.variables} for d in initialGuesses]
+			initialGuesses = [{key:d[key] for key in self.sampler.variables} for d in initialGuesses]
 			pop = Population.new(X=initialGuesses)
 		elif hasattr(self,'result'):
 			x = self.result.X
@@ -50,12 +50,12 @@ class searchRoutine(routine):
 		super().__init__(sampler, configuration = configuration, name = name)
 		self.df = self.sampler.getDF(**kwargs)
 		self.df['ID'] = self.df.apply(hashRow,axis=1,**self.configuration)
+		method = kwargs.get('method','grid')
+		density = kwargs.get('density',5)
 		if not(name):
-			method = kwargs.get('method','grid')
-			density = kwargs.get('density',5)
 			self.name = 'Search routine ({} at {} Density)'.format(method.lower(),density)
 	
-	def __call__(self,runFunction):
+	def __call__(self,runFunction,**kwargs):
 		for index,row in self.df.iterrows():
 			runText = 'Search: running {} of {}'.format(index+1,len(self.df))
 			results = runFunction(row, runText=runText)

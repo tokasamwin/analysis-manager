@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 class stage(object):
 	'''
 	Object to wrap stages managed in a runManager
@@ -18,7 +20,7 @@ class stage(object):
 	def name(self,value):
 		self._name=value
 
-	def __init__(self,function: callable,inputs: list[str] | None=None,gate: callable | None=None,name: str | None=None,outFile: str='statepoint*h5'):
+	def __init__(self,function: Callable,inputs: list[str] | None=None,gate: Callable | None=None,name: str | None=None,outFile: str='statepoint*h5'):
 		'''
 		Stages: progressive steps of a design point assessment.
 		inputs: a list of the names of the inputs to use when calling the function. These must match column names in the runManager.df DataFrame
