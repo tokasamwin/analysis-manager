@@ -1,9 +1,5 @@
 # Analysis Manager
 
-![banner](assets/text_wordmark_dark.png)
-
-[![license](https://img.shields.io/github/license/RichardLitt/standard-readme.svg?color=bright-green&style=flat-square)](LICENSE)
-
 A small python based tool for managing scientific and engineering analysis.
 
 ## Table of Contents
@@ -11,7 +7,6 @@ A small python based tool for managing scientific and engineering analysis.
 - [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
-- [API](#api)
 - [Contributing](#contributing)
 - [License](#license)
 
