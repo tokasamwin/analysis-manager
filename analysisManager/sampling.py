@@ -3,14 +3,15 @@ from pandas import DataFrame as df
 from scipy.stats.qmc import Sobol
 from collections.abc import Iterable
 sobolSeed = 1
-
+from analysisManager.utils import iterableCheck
 
 class basicSampler(object):
 	def __init__(self, **variables: dict[str,tuple[float,float]]):
 		self.variables = variables
 	
-	def sobol(self,density: int) -> np.ndarray:
-		sampler=Sobol(len(self.variables),rng=sobolSeed)
+	def sobol(self,density: int,seed: int = None) -> np.ndarray:
+		seed = sobolSeed if seed is None else seed
+		sampler=Sobol(len(self.variables),rng=seed)
 		points=sampler.random_base2(density)
 		self.samples=[]
 		for point in points:
@@ -25,7 +26,7 @@ class basicSampler(object):
 		ranges=[self.variables[name] for name in self.variables]
 		if density==1:
 			self.samples=[[np.mean(valRange) for valRange in ranges]]
-		elif type(density) in iterClasses:
+		elif iterableCheck(density):
 			if len(density)!=len(self.variables): raise AttributeError('Incorrect density shape: use a {} length iterable'.format(len(self.variables)))
 			axes=[]
 			for valDensity,valRange in zip(density,ranges):
@@ -181,7 +182,7 @@ class definedSampler(object):
 	def grid(self,density: int | tuple[int] | list[int]) -> list[dict]:
 		if density==1:
 			continuousSamples=[{name:self.variables[name](0.5) for name in self.continuousVariableNames}] # median value in the range
-		elif type(density) in iterClasses:
+		elif iterableCheck(density):
 			if len(density)!=len(self.continuousVariableNames): raise AttributeError('Incorrect density shape')
 			axes=[]
 			for val in density:

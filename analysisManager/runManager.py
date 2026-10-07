@@ -85,10 +85,11 @@ class runManager(object):
 				removeFolder(folder)
 
 if __name__ == '__main__':
+	from analysisManager import stage, basicSampler, optimiseRoutine
 	def fun1(depth,width,**kwargs):
 		return {'area':depth*width}
 	stage1 = stage(fun1,args=['depth','width'],name='area')
-	stageGate = lambda row: ['area']>10
+	stageGate = lambda row: row['area']>10
 	def fun2(depth,width,height,**kwargs):
 		return {'volume':depth*width*height}
 	stage2 = stage(fun2,args = ['depth','width','height'],gate = stageGate)
@@ -97,10 +98,8 @@ if __name__ == '__main__':
 		'volume':lambda v: -v,
 		'area': lambda a: a
 	}
-	sampler = dfs.sampler(depth=(1,10),width=(2,5),height=(0.1,8))
-	args = list(sampler.variables.keys())
-	for arg in args:
-		sampler.variables['arg;'+arg] = sampler.variables[arg]
-		del(sampler.variables[arg])
-	optimiser = runOptimiserGA(stages,sampler,name='Code testing')
-	optimiser.generateProblem([-1e6,1e6],**resultTargetFunctions)
+	from numpy import inf
+	targetFunction = lambda row: (row.get('volume',inf),-row.get('area',-inf))
+	sampler = basicSampler(depth=(1,10),width=(2,5),height=(0.1,8))
+	optimiser = optimiseRoutine(targetFunction = targetFunction, sampler = sampler)
+	runner = runManager(stages=stages,routines=[optimiser],name='testRun')

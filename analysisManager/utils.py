@@ -3,6 +3,8 @@ from hashlib import shake_128
 from struct import pack
 from pandas import Series
 from collections.abc import Iterable
+iterableCheck = lambda i: issubclass(type(i),Iterable) and not isinstance(i,str)
+
 
 def hashRow(
 	row: Series | dict,
@@ -21,12 +23,12 @@ def hashRow(
 	while iterables:
 		newInputs=[]
 		for i,val in enumerate(inputs):
-			if issubclass(type(val),Iterable) and not isinstance(val,str):
+			if iterableCheck(val):
 				newInputs+=list(val)
 			else:
 				newInputs.append(val)
 			inputs=newInputs
-		iterables=any([issubclass(type(i),Iterable) and not isinstance(i,str) for i in inputs])
+		iterables=any([iterableCheck(i) for i in inputs])
 	for value in inputs:
 		if type(value) in [str,npString]:
 			array+=str(value).encode(encoding='utf-8')
