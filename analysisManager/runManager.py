@@ -69,8 +69,8 @@ class runManager(object):
 			dump(results,f,indent=4)
 		return results
 
-	def runRoutine(self,routine,**kwargs):
-		localDF = routine(self.runDP,**kwargs).copy(deep=True)
+	def runRoutine(self,routine,workers = None,**kwargs):
+		localDF = routine(self.runDP,workers = workers,**kwargs).copy(deep=True)
 		localDF['Routine'] = routine.name
 		self.df = pd.concat([self.df,localDF],axis=0,ignore_index=True).reset_index(drop=True)
 

@@ -1,4 +1,4 @@
-from analysisManager.utils import hashRow
+from analysisManager.utils import hashRow, iterableCheck
 from analysisManager.sampling import definedSampler
 from copy import deepcopy
 from scipy.interpolate import RBFInterpolator
@@ -14,7 +14,7 @@ from pymoo.core.mixed import MixedVariableSampling
 from pymoo.core.mixed import MixedVariableMating
 from pymoo.core.mixed import MixedVariableDuplicateElimination
 import pandas as pd, numpy as np
-
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 
 class routine(object):
 	def __init__(self, sampler, configuration=None, name = None):
@@ -45,6 +45,34 @@ class routine(object):
 				pop = Population.new(X = dictList)
 		return pop
 
+	def _evaluate_single(self, index, row, runFunction, runText):
+		result = runFunction(row, runText=runText)
+		if result is None:
+			return index, {}
+		return index, result
+
+	def _parallel_run(self, rows, runFunction, workers=None, text_template=None):
+		if not workers:
+			results = []
+			for index, row in rows:
+				runText = None if text_template is None else text_template(index, len(rows))
+				results.append(self._evaluate_single(index, row, runFunction, runText))
+			return results
+
+		max_workers = len(workers) if isinstance(workers, (list, tuple, set)) else workers
+		if max_workers is None or max_workers < 1:
+			max_workers = 1
+
+		futures = []
+		with ThreadPoolExecutor(max_workers=max_workers) as executor:
+			for index, row in rows:
+				runText = None if text_template is None else text_template(index, len(rows))
+				futures.append(
+					executor.submit(self._evaluate_single, index, row, runFunction, runText)
+				)
+
+			return [future.result() for future in as_completed(futures)]
+
 class searchRoutine(routine):
 	def __init__(self, sampler, configuration=None, name=None, **kwargs):
 		super().__init__(sampler, configuration = configuration, name = name)
@@ -55,13 +83,50 @@ class searchRoutine(routine):
 		if not(name):
 			self.name = 'Search routine ({} at {} Density)'.format(method.lower(),density)
 	
-	def __call__(self,runFunction,**kwargs):
+	def __call__(self,runFunction,workers=None,**kwargs):
+		rows = list(self.df.iterrows())
+
+		def text_template(index, count):
+			return 'Search: running {} of {}'.format(index + 1, count)
+
+		results = self._parallel_run(
+			rows,
+			runFunction,
+			workers=workers,
+			text_template=text_template,
+		)
+
+		for index, row_result in results:
+			for key in row_result:
+				self.df.at[index, key] = row_result[key]
+
+		return self.df
 		for index,row in self.df.iterrows():
 			runText = 'Search: running {} of {}'.format(index+1,len(self.df))
 			results = runFunction(row, runText=runText)
 			for key in results:
 				self.df.at[index, key] = results[key]
 		return self.df
+
+class GAProblem(ElementwiseProblem):
+	def __init__(self, variables, nObj, runFunction, targetFunction, configuration):
+		super().__init__(vars=variables, n_obj=nObj)
+		self.nObj = nObj
+		self.runFunction = runFunction
+		self.targetFunction = targetFunction
+		self.configuration = configuration
+		self._evaluationsRows = []
+
+	def _evaluate(self, row, out, *args, **kwargs):
+		row = dict(row)
+		row["ID"] = hashRow(row, **self.configuration)
+		result = self.runFunction(
+			pd.Series(row), 
+			runText="{} Objective Optimisation: ".format(self.nObj)
+		)
+		row.update(result)
+		self._evaluationsRows.append(row.copy())
+		out["F"] = self.targetFunction(row)
 
 class optimiseRoutine(routine):
 	def __init__(self, sampler, targetFunction, name=None, configuration=None, **kwargs):
@@ -92,31 +157,15 @@ class optimiseRoutine(routine):
 		if not(name):
 			self.name = '{} Variable Optimisation'.format(self.nObj)
 
-	def generateProblem(self,function):
-		"""
-		Assign a function to the optimisation problem.
-		This function populates the routine's dataframe
-		"""
-		class GAProblem(ElementwiseProblem):
-			def __init__(this):
-				super().__init__(
-					vars = self.variables,
-					n_obj = self.nObj,
-				)
-			
-			def _evaluate(this,row,out,*args,**kwargs):
-				ID = hashRow(row,**self.configuration)
-				row['ID'] = ID
-				result = function(pd.Series(row),runText = '{} Objective Optimiser: running {}'.format(self.nObj,len(self.df)+1))
-				row.update(result)
-				localDF = pd.DataFrame([row])
-				self.df = pd.concat([self.df,localDF],axis=0,ignore_index=True).reset_index(drop=True)
-				out['F'] = self.targetFunction(row)
-		self.problem = GAProblem()
-
-	def __call__(self,function,**kwargs):
+	def __call__(self,function,workers=None,**kwargs):
 		self.routineConfiguration.update(kwargs)
-		self.generateProblem(function)
+		self.problem = GAProblem(
+			variables = self.variables,
+			runFunction = function,
+			targetFunction = self.targetFunction,
+			configuration=self.configuration,
+			nObj=self.nObj
+			)
 		algorithm = self.routineConfiguration.get('algorithm',NSGA2)
 		survival = self.routineConfiguration.get('survival',None)
 		if not(survival):
@@ -138,14 +187,19 @@ class optimiseRoutine(routine):
 			eliminate_duplicates = MixedVariableDuplicateElimination()
 		)
 		terminationDefault = get_termination("n_gen", self.routineConfiguration.get('n_gen',20))
+		mooKwargs = {
+			'seed':seed,
+			'save_history':True,
+			'workers':max(int(workers),1)
+		}
 		termination = self.routineConfiguration.get('termination',terminationDefault)
 		self.result = minimise(
 			self.problem,
 			self.algorithm,
 			termination,
-			seed=seed,
-			save_history=True
+			**mooKwargs
 			)
+		self.df = pd.DataFrame(self.problem._evaluationsRows)
 		return self.df
 
 class surrogateRoutine(routine):
@@ -278,7 +332,43 @@ class surrogateRoutine(routine):
 			and (self.rTol is None or errors['relative'] <= self.rTol)
 		)
 
-	def __call__(self, runFunction):
+	def __call__(self, runFunction, workers=None):
+		self.df = self.candidates.head(0).copy()
+		rows = list(self.candidates.iterrows())
+
+		def text_template(index, count):
+			return 'Surrogate: running {} of {}'.format(index + 1, count)
+
+		results = self._parallel_run(
+			rows,
+			runFunction,
+			workers=workers,
+			text_template=text_template,
+		)
+
+		for index, row_result in results:
+			row = self.candidates.iloc[index].to_dict()
+			row['ID'] = hashRow(pd.Series(row), **self.configuration)
+			row.update(row_result)
+			self.df = pd.concat([self.df, pd.DataFrame([row])], ignore_index=True)
+
+			if ((self.aTol is not None or self.rTol is not None)
+					and len(self.df) >= self.error_check_interval
+					and len(self.df) % self.error_check_interval == 0):
+				self.error = self._validationErrors()
+				if self._tolerancesMet(self.error):
+					break
+
+		if self.aTol is not None or self.rTol is not None:
+			self.error = self._validationErrors()
+
+		valid = self.df[self.targetOutputs].notna().all(axis=1)
+		if valid.sum() >= 2:
+			self.surrogate = self._fitModel(
+				self.df.loc[valid, self.inputNames],
+				self.df.loc[valid, self.targetOutputs].to_numpy(dtype=float),
+			)
+		return self.df
 		self.df = self.candidates.head(0).copy()
 		for index, inputs in self.candidates.iterrows():
 			row = inputs.to_dict()
