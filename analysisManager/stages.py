@@ -1,5 +1,8 @@
 from collections.abc import Callable
 
+def _basicGate(row):
+	return True
+
 class stage(object):
 	'''
 	Object to wrap stages managed in a runManager
@@ -37,7 +40,7 @@ class stage(object):
 			self.gate=gate
 			self.gateCheck = True
 		else:
-			self.gate=lambda i: True #returns true with all inputs
+			self.gate=_basicGate #returns true with all inputs
 			self.gateCheck = False
 		if inputs:
 			self.inputs=inputs

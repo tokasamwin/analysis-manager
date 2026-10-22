@@ -52,26 +52,34 @@ class routine(object):
 		return index, result
 
 	def _parallel_run(self, rows, runFunction, workers=None, text_template=None):
-		if not workers:
+		workerIntVal = getattr(workers,'__int__',lambda: 1)()
+		workerCheck = [
+			workerIntVal>1,
+			type(workers) in [ProcessPoolExecutor,ThreadPoolExecutor]
+		]
+		if not(any(workerCheck)):
 			results = []
 			for index, row in rows:
 				runText = None if text_template is None else text_template(index, len(rows))
 				results.append(self._evaluate_single(index, row, runFunction, runText))
 			return results
 
-		max_workers = len(workers) if isinstance(workers, (list, tuple, set)) else workers
-		if max_workers is None or max_workers < 1:
-			max_workers = 1
-
 		futures = []
-		with ThreadPoolExecutor(max_workers=max_workers) as executor:
+		if workerCheck[1]:
+			for index,row in rows:
+				runText = None if text_template is None else text_template(index, len(rows))
+				futures.append(
+					workers.submit(self._evaluate_single, index, row, runFunction, runText)
+				)
+			return [future.result() for future in as_completed(futures)]
+
+		with ProcessPoolExecutor(max_workers = workerIntVal) as executor:
 			for index, row in rows:
 				runText = None if text_template is None else text_template(index, len(rows))
 				futures.append(
 					executor.submit(self._evaluate_single, index, row, runFunction, runText)
 				)
-
-			return [future.result() for future in as_completed(futures)]
+		return [future.result() for future in as_completed(futures)]
 
 class searchRoutine(routine):
 	def __init__(self, sampler, configuration=None, name=None, **kwargs):
@@ -100,12 +108,6 @@ class searchRoutine(routine):
 			for key in row_result:
 				self.df.at[index, key] = row_result[key]
 
-		return self.df
-		for index,row in self.df.iterrows():
-			runText = 'Search: running {} of {}'.format(index+1,len(self.df))
-			results = runFunction(row, runText=runText)
-			for key in results:
-				self.df.at[index, key] = results[key]
 		return self.df
 
 class GAProblem(ElementwiseProblem):
@@ -187,6 +189,8 @@ class optimiseRoutine(routine):
 			eliminate_duplicates = MixedVariableDuplicateElimination()
 		)
 		terminationDefault = get_termination("n_gen", self.routineConfiguration.get('n_gen',20))
+		if workers == None:
+			workers = 1
 		mooKwargs = {
 			'seed':seed,
 			'save_history':True,
@@ -334,6 +338,7 @@ class surrogateRoutine(routine):
 
 	def __call__(self, runFunction, workers=None):
 		self.df = self.candidates.head(0).copy()
+		self.candidates['ID'] = self.candidates.apply(hashRow,axis=1,**self.configuration)
 		rows = list(self.candidates.iterrows())
 
 		def text_template(index, count):
@@ -345,7 +350,6 @@ class surrogateRoutine(routine):
 			workers=workers,
 			text_template=text_template,
 		)
-
 		for index, row_result in results:
 			row = self.candidates.iloc[index].to_dict()
 			row['ID'] = hashRow(pd.Series(row), **self.configuration)
@@ -362,29 +366,6 @@ class surrogateRoutine(routine):
 		if self.aTol is not None or self.rTol is not None:
 			self.error = self._validationErrors()
 
-		valid = self.df[self.targetOutputs].notna().all(axis=1)
-		if valid.sum() >= 2:
-			self.surrogate = self._fitModel(
-				self.df.loc[valid, self.inputNames],
-				self.df.loc[valid, self.targetOutputs].to_numpy(dtype=float),
-			)
-		return self.df
-		self.df = self.candidates.head(0).copy()
-		for index, inputs in self.candidates.iterrows():
-			row = inputs.to_dict()
-			row['ID'] = hashRow(pd.Series(row), **self.configuration)
-			runText = 'Surrogate: running {} of {}'.format(index + 1, len(self.candidates))
-			result = runFunction(pd.Series(row), runText=runText)
-			row.update(result)
-			self.df = pd.concat([self.df, pd.DataFrame([row])], ignore_index=True)
-			if ((self.aTol is not None or self.rTol is not None)
-					and len(self.df) >= self.error_check_interval
-					and len(self.df) % self.error_check_interval == 0):
-				self.error = self._validationErrors()
-				if self._tolerancesMet(self.error):
-					break
-		if self.aTol is not None or self.rTol is not None:
-			self.error = self._validationErrors()
 		valid = self.df[self.targetOutputs].notna().all(axis=1)
 		if valid.sum() >= 2:
 			self.surrogate = self._fitModel(
@@ -426,8 +407,8 @@ if __name__ == '__main__':
 		return {'area':depth*width}
 	areaStage = stage(findArea,inputs=['depth','width'],name = 'Area')
 
-	maxArea = lambda row: row.get('area')<5
-
+	#maxArea = lambda row: row.get('area')<5
+	def maxArea(row): return row.get('area')<5
 	def findVolume(height,width,depth,**kwargs):
 		return {'volume':depth*width*height}
 
@@ -435,7 +416,7 @@ if __name__ == '__main__':
 	stages = [areaStage,volumeStage]
 	
 	runner = runManager(stages,routines = routines,name='Test')
-	runner.runRoutines()
+	runner.runRoutines(workers = 4)
 	
 	bestResults = runner.df.dropna().sort_values('volume').iloc[-10:]
 	initialGuesses = [row.to_dict() for index,row in bestResults.iterrows()]
@@ -464,6 +445,7 @@ if __name__ == '__main__':
 	targetOutputs = ('volume','mass')
 	surrogate = surrogateRoutine(sampler = localSampler,targetOutputs = targetOutputs)
 	surrogateRunner = runManager(stages = [runStage],name='Surrogate test',routines = [surrogate])
-	surrogateRunner.runRoutines()
+	with ProcessPoolExecutor(max_workers = 8) as mp_pool:
+		surrogateRunner.runRoutines(workers = mp_pool)
 	guessPoint = {'area':120,'height':15,'density':0.03}
 	guessResult = surrogateRunner.routines[0].predict(guessPoint)
