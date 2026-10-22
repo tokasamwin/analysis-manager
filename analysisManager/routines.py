@@ -15,9 +15,16 @@ from pymoo.core.mixed import MixedVariableMating
 from pymoo.core.mixed import MixedVariableDuplicateElimination
 import pandas as pd, numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+from collections.abc import Callable as _Callable, Hashable as _Hashable, Sequence as _Sequence
+from typing import Any as _Any, Optional as _Optional, Union as _Union
 
 class routine(object):
-	def __init__(self, sampler, configuration=None, name = None):
+	def __init__(
+		self,
+		sampler: _Any,
+		configuration: _Optional[dict[str, _Any]] = None,
+		name: _Optional[str] = None,
+	) -> None:
 		if configuration:
 			self.configuration = configuration
 		else:
@@ -45,13 +52,25 @@ class routine(object):
 				pop = Population.new(X = dictList)
 		return pop
 
-	def _evaluate_single(self, index, row, runFunction, runText):
+	def _evaluate_single(
+		self,
+		index: int,
+		row: _Union[pd.Series, dict[str, _Any]],
+		runFunction: _Callable[..., _Optional[dict[str, _Any]]],
+		runText: _Optional[str],
+	) -> tuple[int, dict[str, _Any]]:
 		result = runFunction(row, runText=runText)
 		if result is None:
 			return index, {}
 		return index, result
 
-	def _parallel_run(self, rows, runFunction, workers=None, text_template=None):
+	def _parallel_run(
+		self,
+		rows: _Sequence[tuple[int, _Union[pd.Series, dict[str, _Any]]]],
+		runFunction: _Callable[..., _Optional[dict[str, _Any]]],
+		workers: _Any = None,
+		text_template: _Optional[_Callable[[int, int], str]] = None,
+	) -> list[tuple[int, dict[str, _Any]]]:
 		workerIntVal = getattr(workers,'__int__',lambda: 1)()
 		workerCheck = [
 			workerIntVal>1,
@@ -82,7 +101,13 @@ class routine(object):
 		return [future.result() for future in as_completed(futures)]
 
 class searchRoutine(routine):
-	def __init__(self, sampler, configuration=None, name=None, **kwargs):
+	def __init__(
+		self,
+		sampler: _Any,
+		configuration: _Optional[dict[str, _Any]] = None,
+		name: _Optional[str] = None,
+		**kwargs: _Any,
+	) -> None:
 		super().__init__(sampler, configuration = configuration, name = name)
 		self.df = self.sampler.getDF(**kwargs)
 		self.df['ID'] = self.df.apply(hashRow,axis=1,**self.configuration)
@@ -91,10 +116,15 @@ class searchRoutine(routine):
 		if not(name):
 			self.name = 'Search routine ({} at {} Density)'.format(method.lower(),density)
 	
-	def __call__(self,runFunction,workers=None,**kwargs):
+	def __call__(
+		self,
+		runFunction: _Callable[..., _Optional[dict[str, _Any]]],
+		workers: _Any = None,
+		**kwargs: _Any,
+	) -> pd.DataFrame:
 		rows = list(self.df.iterrows())
 
-		def text_template(index, count):
+		def text_template(index: int, count: int) -> str:
 			return 'Search: running {} of {}'.format(index + 1, count)
 
 		results = self._parallel_run(
@@ -113,7 +143,14 @@ class searchRoutine(routine):
 		return self.df
 
 class GAProblem(ElementwiseProblem):
-	def __init__(self, variables, nObj, runFunction, targetFunction, configuration):
+	def __init__(
+		self,
+		variables: dict[str, _Any],
+		nObj: int,
+		runFunction: _Callable[..., dict[str, _Any]],
+		targetFunction: _Callable[[dict[str, _Any]], _Any],
+		configuration: dict[str, _Any],
+	) -> None:
 		super().__init__(vars=variables, n_obj=nObj)
 		self.nObj = nObj
 		self.runFunction = runFunction
@@ -121,7 +158,13 @@ class GAProblem(ElementwiseProblem):
 		self.configuration = configuration
 		self._evaluationsRows = []
 
-	def _evaluate(self, row, out, *args, **kwargs):
+	def _evaluate(
+		self,
+		row: dict[str, _Any],
+		out: dict[str, _Any],
+		*args: _Any,
+		**kwargs: _Any,
+	) -> None:
 		row = dict(row)
 		row["ID"] = hashRow(row, **self.configuration)
 		result = self.runFunction(
@@ -133,7 +176,14 @@ class GAProblem(ElementwiseProblem):
 		out["F"] = self.targetFunction(row)
 
 class optimiseRoutine(routine):
-	def __init__(self, sampler, targetFunction, name=None, configuration=None, **kwargs):
+	def __init__(
+		self,
+		sampler: _Any,
+		targetFunction: _Callable[[dict[str, _Any]], _Any],
+		name: _Optional[str] = None,
+		configuration: _Optional[dict[str, _Any]] = None,
+		**kwargs: _Any,
+	) -> None:
 		"""
 		This is an optimisation routine run across the sampler design space. 
 		The routine will run the design space and store the results in a pd.DataFrame, which can then be used to find the optimal design.
@@ -161,7 +211,12 @@ class optimiseRoutine(routine):
 		if not(name):
 			self.name = '{} Variable Optimisation'.format(self.nObj)
 
-	def __call__(self,function,workers=None,**kwargs):
+	def __call__(
+		self,
+		function: _Callable[..., dict[str, _Any]],
+		workers: _Any = None,
+		**kwargs: _Any,
+	) -> pd.DataFrame:
 		self.routineConfiguration.update(kwargs)
 		self.problem = GAProblem(
 			variables = self.variables,
@@ -216,10 +271,20 @@ class surrogateRoutine(routine):
 	model may be an estimator class/instance with ``fit`` and ``predict``, or a
 	callable accepting ``(X, Y)`` and returning a predictor.
 	"""
-	def __init__(self, sampler, targetOutputs, startDensity = 7,
-			aTol=None, rTol=None, model=None,
-			name=None, configuration=None, method='sobol', validation_fraction=0.2,
-			error_check_interval=5):
+	def __init__(
+		self,
+		sampler: _Any,
+		targetOutputs: _Union[str, _Sequence[str]],
+		startDensity: int = 7,
+		aTol: _Optional[float] = None,
+		rTol: _Optional[float] = None,
+		model: _Any = None,
+		name: _Optional[str] = None,
+		configuration: _Optional[dict[str, _Any]] = None,
+		method: str = 'sobol',
+		validation_fraction: float = 0.2,
+		error_check_interval: int = 5,
+	) -> None:
 		super().__init__(sampler, configuration=configuration, name=name)
 		if isinstance(targetOutputs, str):
 			targetOutputs = [targetOutputs]
@@ -251,7 +316,7 @@ class surrogateRoutine(routine):
 		self.error = None
 		self._prepareCandidates()
 
-	def _prepareCandidates(self):
+	def _prepareCandidates(self) -> None:
 		if self.method == 'sobol':
 			candidates = self.sampler.getDF(density=self.density, method='sobol')
 		else:
@@ -274,18 +339,18 @@ class surrogateRoutine(routine):
 		encoded = self._encodeInputs(self.candidates)
 		self._featureNames = list(encoded.columns)
 
-	def _encodeInputs(self, inputs):
+	def _encodeInputs(self, inputs: pd.DataFrame) -> pd.DataFrame:
 		frame = pd.DataFrame(inputs).loc[:, self.inputNames].copy()
 		for name in self._numericInputs:
 			low, span = self._numericBounds[name]
 			frame[name] = (frame[name] - low) / span
 		return pd.get_dummies(frame, columns=self._categoricalInputs, dtype=float)
 
-	def _features(self, inputs):
+	def _features(self, inputs: pd.DataFrame) -> np.ndarray:
 		encoded = self._encodeInputs(inputs).reindex(columns=self._featureNames, fill_value=0)
 		return encoded.to_numpy(dtype=float)
 
-	def _fitModel(self, inputs, outputs):
+	def _fitModel(self, inputs: pd.DataFrame, outputs: np.ndarray) -> _Any:
 		features = self._features(inputs)
 		uniqueFeatures, uniqueIndices = np.unique(features, axis=0, return_index=True)
 		outputs = outputs[uniqueIndices]
@@ -301,12 +366,12 @@ class surrogateRoutine(routine):
 		return model
 
 	@staticmethod
-	def _modelPredict(model, features):
+	def _modelPredict(model: _Any, features: np.ndarray) -> np.ndarray:
 		if hasattr(model, 'predict'):
 			return np.asarray(model.predict(features))
 		return np.asarray(model(features))
 
-	def _validationErrors(self):
+	def _validationErrors(self) -> _Optional[dict[str, float]]:
 		valid = self.df[self.targetOutputs].notna().all(axis=1).to_numpy()
 		indices = np.arange(len(self.df))
 		spacing = max(2, int(round(1 / self.validation_fraction)))
@@ -330,7 +395,7 @@ class surrogateRoutine(routine):
 			'relative': float(np.max(relativeError)),
 		}
 
-	def _tolerancesMet(self, errors):
+	def _tolerancesMet(self, errors: _Optional[dict[str, float]]) -> bool:
 		if errors is None or (self.aTol is None and self.rTol is None):
 			return False
 		return (
@@ -338,12 +403,16 @@ class surrogateRoutine(routine):
 			and (self.rTol is None or errors['relative'] <= self.rTol)
 		)
 
-	def __call__(self, runFunction, workers=None):
+	def __call__(
+		self,
+		runFunction: _Callable[..., _Optional[dict[str, _Any]]],
+		workers: _Any = None,
+	) -> pd.DataFrame:
 		self.df = self.candidates.head(0).copy()
 		self.candidates['ID'] = self.candidates.apply(hashRow,axis=1,**self.configuration)
 		rows = list(self.candidates.iterrows())
 
-		def text_template(index, count):
+		def text_template(index: int, count: int) -> str:
 			return 'Surrogate: running {} of {}'.format(index + 1, count)
 
 		results = self._parallel_run(
@@ -376,7 +445,7 @@ class surrogateRoutine(routine):
 			)
 		return self.df
 
-	def predict(self, inputs):
+	def predict(self, inputs: _Any) -> pd.DataFrame:
 		if self.surrogate is None:
 			raise RuntimeError('Run the routine successfully before predicting')
 		isSinglePoint = isinstance(inputs, dict) and not any(
@@ -391,40 +460,45 @@ if __name__ == '__main__':
 	from analysisManager import sampling
 	from analysisManager.stages import stage
 	from analysisManager.runManager import runManager
-	sampler = sampling.basicSampler(
+	sampler: sampling.basicSampler = sampling.basicSampler(
 		height=(0.1,10),
 		width=(0.1,10),
 		depth=(0.1,10),
 	)
 	from numpy import inf
-	search = searchRoutine(sampler)
-	def targetOptimise(row):
+	search: searchRoutine = searchRoutine(sampler)
+	def targetOptimise(row: dict[str, _Any]) -> tuple[float, float]:
 		return -row.get('volume',-inf),row.get('area',inf)
-	MOO = optimiseRoutine(sampler,targetFunction=targetOptimise)
+	MOO: optimiseRoutine = optimiseRoutine(sampler,targetFunction=targetOptimise)
 	from pymoo.core.mixed import MixedVariableGA
-	def volumeOptimise(row):
+	def volumeOptimise(row: dict[str, _Any]) -> float:
 		return -row.get('volume',-inf)
-	routines = [search,MOO]
-	def findArea(depth,width,**kwargs):
+	routines: list[routine] = [search,MOO]
+	def findArea(depth: float, width: float, **kwargs: _Any) -> dict[str, float]:
 		return {'area':depth*width}
-	areaStage = stage(findArea,inputs=['depth','width'],name = 'Area')
+	areaStage: stage = stage(findArea,inputs=['depth','width'],name = 'Area')
 
 	#maxArea = lambda row: row.get('area')<5
-	def maxArea(row): return row.get('area')<5
-	def findVolume(height,width,depth,**kwargs):
+	def maxArea(row: dict[str, _Any]) -> bool: return row.get('area')<5
+	def findVolume(
+		height: float,
+		width: float,
+		depth: float,
+		**kwargs: _Any,
+	) -> dict[str, float]:
 		return {'volume':depth*width*height}
 
-	volumeStage = stage(findVolume,inputs=['height','width','depth'],name='Volume',gate = maxArea)
-	stages = [areaStage,volumeStage]
+	volumeStage: stage = stage(findVolume,inputs=['height','width','depth'],name='Volume',gate = maxArea)
+	stages: list[stage] = [areaStage,volumeStage]
 	
-	runner = runManager(stages,routines = routines,name='Test')
+	runner: runManager = runManager(stages,routines = routines,name='Test')
 	runner.runRoutines(workers = 4)
 	
-	bestResults = runner.df.dropna().sort_values('volume').iloc[-10:]
-	initialGuesses = [row.to_dict() for index,row in bestResults.iterrows()]
-	initialGuesses = [{key:d[key] for key in sampler.variables} for d in initialGuesses]
-	population = Population.new(X=initialGuesses)
-	SOO = optimiseRoutine(
+	bestResults: pd.DataFrame = runner.df.dropna().sort_values('volume').iloc[-10:]
+	initialGuesses: list[dict[_Hashable, _Any]] = [row.to_dict() for index,row in bestResults.iterrows()]
+	initialGuesses: list[dict[_Hashable, _Any]] = [{key:d[key] for key in sampler.variables} for d in initialGuesses]
+	population: Population = Population.new(X=initialGuesses)
+	SOO: optimiseRoutine = optimiseRoutine(
 		sampler,
 		targetFunction = volumeOptimise,
 		algorithm = MixedVariableGA,
@@ -432,22 +506,27 @@ if __name__ == '__main__':
 		sampling = population,
 		)
 	runner.runRoutine(SOO)
-	def function(height,area,density,**kwargs):
+	def function(
+		height: float,
+		area: float,
+		density: float,
+		**kwargs: _Any,
+	) -> dict[str, float]:
 		results = {
 			'volume': height*area,
 			'mass': density * height * area
 		}
 		return results
-	runStage = stage(function,name='test',inputs = ['height','area','density'])
-	localSampler = sampling.basicSampler(
+	runStage: stage = stage(function,name='test',inputs = ['height','area','density'])
+	localSampler: sampling.basicSampler = sampling.basicSampler(
 		height = (10,30),
 		area = (100,200),
 		density = (0.01,0.04)
 	)
-	targetOutputs = ('volume','mass')
-	surrogate = surrogateRoutine(sampler = localSampler,targetOutputs = targetOutputs)
-	surrogateRunner = runManager(stages = [runStage],name='Surrogate test',routines = [surrogate])
+	targetOutputs: tuple[str, str] = ('volume','mass')
+	surrogate: surrogateRoutine = surrogateRoutine(sampler = localSampler,targetOutputs = targetOutputs)
+	surrogateRunner: runManager = runManager(stages = [runStage],name='Surrogate test',routines = [surrogate])
 	with ProcessPoolExecutor(max_workers = 8) as mp_pool:
 		surrogateRunner.runRoutines(workers = mp_pool)
-	guessPoint = {'area':120,'height':15,'density':0.03}
-	guessResult = surrogateRunner.routines[0].predict(guessPoint)
+	guessPoint: dict[str, float] = {'area':120,'height':15,'density':0.03}
+	guessResult: pd.DataFrame = surrogateRunner.routines[0].predict(guessPoint)
