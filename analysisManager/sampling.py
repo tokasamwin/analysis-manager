@@ -74,7 +74,7 @@ def distributedParameterGrid(parameters: int = 3 ,subdivisions: int = 5) -> np.n
 		index+=1
 	results=[array(i)/(subdivisions-1) for i in results]
 	results=list(filter(lambda i: sum(i)==1,results))
-	return np.ndarray(results)
+	return np.array(results)
 
 from copy import copy
 _lineNoneSum=lambda array: sum(list(filter(lambda i: i,array))) #filters NoneTypes out of the line

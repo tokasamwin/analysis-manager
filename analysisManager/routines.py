@@ -105,8 +105,10 @@ class searchRoutine(routine):
 		)
 
 		for index, row_result in results:
-			for key in row_result:
-				self.df.at[index, key] = row_result[key]
+			for key, value in row_result.items():
+				if key not in self.df.columns:
+					self.df[key] = pd.Series(index=self.df.index, dtype=object)
+				self.df.at[index, key] = value
 
 		return self.df
 
