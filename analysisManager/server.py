@@ -41,7 +41,8 @@ from analysisManager import (
 	optimiseRoutine,
 	surrogateRoutine,
 )
-import analysisManager.routineDashboard
+from analysisManager.sampling import _methods as _samplingMethods
+
 from analysisManager.routineDashboard import routineDashboard
 from analysisManager.stage_functions import (
 	resolveReference,
@@ -180,9 +181,9 @@ def buildRoutines(routineSpecs) -> tuple[list, bool]:
 			if 'density' in routineSpec:
 				kwargs['density'] = routineSpec['density']
 			if 'method' in routineSpec:
-				if routineSpec['method'] not in ('grid', 'sobol'):
-					raise SpecError(
-						'{} "method" must be "grid" or "sobol"'.format(label))
+				if routineSpec['method'] not in _samplingMethods:
+					errLabel = '{} "method" must be in:\n\t'.format(routineSpec['method']) + '\n\t'.join(_samplingMethods)
+					raise SpecError(errLabel)
 				kwargs['method'] = routineSpec['method']
 			routines.append(searchRoutine(sampler, **kwargs))
 		elif routineType == 'optimise':

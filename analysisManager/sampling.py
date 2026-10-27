@@ -5,6 +5,7 @@ from collections.abc import Iterable
 sobolSeed = 1
 from analysisManager.utils import iterableCheck
 
+_methods = ('sobol','grid')
 class basicSampler(object):
 	def __init__(self, **variables: dict[str,tuple[float,float]]):
 		self.variables = variables
@@ -38,7 +39,7 @@ class basicSampler(object):
 		return self.samples
 
 	def getPoints(self,density: int | Iterable = 5,method: str ='grid') -> list[dict]:
-		if method.lower() not in ['grid','sobol']:
+		if method.lower() not in _methods:
 			raise AttributeError('Invalid method, choose from "grid" or "sobol" (case insensitive)')
 		points = getattr(self,method.lower())(density)
 		pointsList = [
