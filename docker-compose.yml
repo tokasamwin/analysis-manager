@@ -1,0 +1,16 @@
+services:
+  analysis-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: analysis-server:local
+    ports:
+      - "8080:8080"
+    environment:
+      ANALYSIS_WORKERS: "4"
+    volumes:
+      # Persistent run data (inputs, results, per-design-point folders)
+      - ./data:/data
+      # Optional stage-function registry (mount a registry JSON file)
+      - ./docker/registry.example.json:/etc/analysis/registry.json:ro
+    # restart: unless-stopped

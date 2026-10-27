@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.git/
+data/
+examples/*.ipynb
+.ipynb_checkpoints/
+tests/
+*.md
