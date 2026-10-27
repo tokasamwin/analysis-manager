@@ -1,7 +1,28 @@
+from collections.abc import Sequence
+from typing import List, Optional, Tuple, Union
+
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
-def plotter(df, cols, colourData = None,figsize = (12,6),textIncline=10):
+
+def plotter(
+	df: pd.DataFrame,
+	cols: Sequence[str],
+	colourData: Optional[
+		List[
+			Optional[
+				Union[
+					str,
+					Tuple[float, float, float],
+					Tuple[float, float, float, float],
+				]
+			]
+		]
+	] = None,
+	figsize: Tuple[float, float] = (12, 6),
+	textIncline: float = 10,
+) -> plt.Figure:
 	"""
 	Plots parallel coordinates where each axis has its own scale
 	without permanent data normalization in the source dataframe.

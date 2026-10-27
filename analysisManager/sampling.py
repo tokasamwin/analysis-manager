@@ -5,6 +5,7 @@ from collections.abc import Iterable
 sobolSeed = 1
 from analysisManager.utils import iterableCheck
 
+_methods = ('sobol','grid')
 class basicSampler(object):
 	def __init__(self, **variables: dict[str,tuple[float,float]]):
 		self.variables = variables
@@ -38,7 +39,7 @@ class basicSampler(object):
 		return self.samples
 
 	def getPoints(self,density: int | Iterable = 5,method: str ='grid') -> list[dict]:
-		if method.lower() not in ['grid','sobol']:
+		if method.lower() not in _methods:
 			raise AttributeError('Invalid method, choose from "grid" or "sobol" (case insensitive)')
 		points = getattr(self,method.lower())(density)
 		pointsList = [
@@ -74,7 +75,7 @@ def distributedParameterGrid(parameters: int = 3 ,subdivisions: int = 5) -> np.n
 		index+=1
 	results=[array(i)/(subdivisions-1) for i in results]
 	results=list(filter(lambda i: sum(i)==1,results))
-	return np.ndarray(results)
+	return np.array(results)
 
 from copy import copy
 _lineNoneSum=lambda array: sum(list(filter(lambda i: i,array))) #filters NoneTypes out of the line

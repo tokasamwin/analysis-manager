@@ -1,4 +1,8 @@
 from collections.abc import Callable
+from typing import Any, Literal
+
+def _basicGate(row) -> bool:
+	return True
 
 class stage(object):
 	'''
@@ -17,10 +21,10 @@ class stage(object):
 		return self._name
 
 	@name.setter
-	def name(self,value):
+	def name(self,value) -> None:
 		self._name=value
 
-	def __init__(self,function: Callable,inputs: list[str] | None=None,gate: Callable | None=None,name: str | None=None,outFile: str='statepoint*h5'):
+	def __init__(self,function: Callable,inputs: list[str] | None=None,gate: Callable | None=None,name: str | None=None,outFile: str='statepoint*h5') -> None:
 		'''
 		Stages: progressive steps of a design point assessment.
 		inputs: a list of the names of the inputs to use when calling the function. These must match column names in the runManager.df DataFrame
@@ -30,23 +34,23 @@ class stage(object):
 		outFile: the file to search for in the folder used for running this stage. The files matching the regex search of this string will be passed to the wrapped function, and can be used to avoid re-running analysis
 		'''
 		if name:
-			self._name=name
+			self._name: str=name
 		else:
-			self._name=function.__name__
+			self._name: str=function.__name__
 		if gate:
-			self.gate=gate
+			self.gate: Callable[..., Any]=gate
 			self.gateCheck = True
 		else:
-			self.gate=lambda i: True #returns true with all inputs
+			self.gate: Callable[..., Literal[True]]=_basicGate #returns true with all inputs
 			self.gateCheck = False
 		if inputs:
-			self.inputs=inputs
+			self.inputs: list[str]=inputs
 		else:
 			self.inputs=[]
-		self.function=function
-		self.outFile=outFile
+		self.function: Callable[..., Any]=function
+		self.outFile: str=outFile
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		representation = 'Stage {}'
 		if self.gateCheck: representation+=' with gate'
 		return representation

@@ -54,6 +54,84 @@ These aspects are all implemented in a modular way. Get your workflow working wi
    |- Run configuration data
 ```
 
+## Web API & Docker
+
+analysisManager can run as a web service: clients submit **run specs** (JSON) containing samplers, stages and routines, and the server executes them inside its process/container, one run at a time behind a FIFO queue.
+
+```bash
+pip install .[server]          # base package + flask + gunicorn
+gunicorn analysisManager.server:app --bind 0.0.0.0:8080 --workers 1 --threads 8
+```
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | liveness (queue/running state) |
+| `GET /api/config` | data dir, registry, version |
+| `POST /api/runs` | submit a run spec → `202 {run_id, ...}` |
+| `GET /api/runs/{id}` | status, per-routine progress, design points completed |
+| `GET /api/runs/{id}/results?format=csv\|json` | the accumulated results DataFrame |
+| `GET /api/runs/{id}/dashboard` | self-refreshing HTML dashboard |
+| `DELETE /api/runs/{id}` | cancel — not implemented yet (`501`) |
+
+### Run spec
+
+```json
+{
+  "name": "example",
+  "workers": "threads",
+  "stages": [
+    {"name": "area",
+     "inputs": ["depth", "width"],
+     "function": {"code": "def f(depth, width, **kwargs):\n\treturn {'area': depth * width}", "function": "f"},
+     "gate": {"code": "lambda row: row.get('area', 0) > 5"}}
+  ],
+  "routines": [
+    {"type": "search",
+     "sampler": {"kind": "basic", "variables": {"depth": [1, 10], "width": [2, 5]}},
+     "density": 5},
+    {"type": "optimise",
+     "sampler": {"kind": "basic", "variables": {"depth": [1, 10], "width": [2, 5]}},
+     "target": {"code": "lambda row: -row.get('volume', 1e6)"},
+     "pop_size": 20, "n_gen": 20}
+  ]
+}
+```
+
+See `examples/api_client_example.py` for a ready-made client.
+
+### Stage functions across the wire
+
+Every callable slot (`function`, `gate`, `target`, surrogate `model`) takes one of:
+
+* `{"name": "package.module.function"}` or `{"name": "registry-alias"}` — a real importable function, resolved through the **registry** (a JSON file of aliases → dotted paths, from the `ANALYSIS_STAGE_REGISTRY` env var; see `docker/registry.example.json`).
+* `{"code": "lambda row: ...", "function": "optional_name"}` — inline Python, executed in a restricted namespace (`np`, `pd`, `math`, `inf` available; imports and `os`/`subprocess`/`open` and friends are blocked).
+
+**Worker modes** (`"workers"`):
+
+| Mode | Registry functions | Inline code | Notes |
+|---|---|---|---|
+| `none` (default: `threads`) | ✅ | ✅ | sequential |
+| `threads` | ✅ | ✅ | in-process thread pool; best when stages wrap external binaries (the common HPC pattern) |
+| `processes` | ✅ | ❌ → `422` | parallel worker processes; inline code cannot be pickled into fresh processes |
+
+### Environment variables
+
+| Variable | Meaning |
+|---|---|
+| `ANALYSISMANAGER_DATADIR` | data directory for run outputs (no interactive prompt when set) |
+| `ANALYSIS_STAGE_REGISTRY` | path to the stage-function registry JSON file |
+| `ANALYSIS_WORKERS` | default `workerCount` for `threads`/`processes` modes |
+
+### Docker
+
+```bash
+docker compose up --build
+```
+
+mounts `./data` to `/data` for results, an optional registry file at `/etc/analysis/registry.json`, and exposes port `8080`. Bake any analysis tools your stage functions need into the image (extend the `builder` stage of `Dockerfile`).
+
 ## Contributing
 
 PRs accepted.
