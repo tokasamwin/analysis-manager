@@ -1,5 +1,0 @@
-{
-	"findArea": "analysisManager.examples.exampleStages.findArea",
-	"findVolume": "analysisManager.examples.exampleStages.findVolume",
-	"areaGate": "analysisManager.examples.exampleStages.areaGate"
-}
