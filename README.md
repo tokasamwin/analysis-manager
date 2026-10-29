@@ -70,10 +70,40 @@ gunicorn analysisManager.server:app --bind 0.0.0.0:8080 --workers 1 --threads 8
 | `GET /health` | liveness (queue/running state) |
 | `GET /api/config` | data dir, registry, version |
 | `POST /api/runs` | submit a run spec → `202 {run_id, ...}` |
+| `GET /api/runs` | list runs (live state wins over disk), `?limit=` |
 | `GET /api/runs/{id}` | status, per-routine progress, design points completed |
 | `GET /api/runs/{id}/results?format=csv\|json` | the accumulated results DataFrame |
 | `GET /api/runs/{id}/dashboard` | self-refreshing HTML dashboard |
 | `DELETE /api/runs/{id}` | cancel — not implemented yet (`501`) |
+
+### Durable outputs
+
+Each run leaves a durable record in `dataDir/<run name>/` so results survive server restarts:
+
+```
+dataDir/<run name>/
+├── run.json            run status & metadata (written at queued → running → finished)
+│     {run_id, name, status, spec, workers, timestamps, error, traceback,
+│      version, routines: [{name, state}]}
+├── results.csv         joined results table (identical bytes to the live endpoint)
+├── config-<hash>.json  run configuration (library)
+└── <ID>/               one folder per design point
+    ├── inputs.json
+    ├── results.json    written only if all stages passed
+    └── <stage>/…       your stage functions' artifacts
+```
+
+Status values: `queued`, `running`, `succeeded`, `failed`, `interrupted`. At server start, any run still marked `queued`/`running` on disk is re-marked `interrupted` (its per-design-point artifacts are preserved; the joined table was in memory and is lost).
+
+Because the **run name** is the disk folder name, it is the stable key across restarts — `GET /api/runs/{name}` and `GET /api/runs/{run_id}` both resolve from disk. Fire-and-forget workflow:
+
+```bash
+RID=$(curl -s -X POST localhost:8080/api/runs -H 'Content-Type: application/json' \
+      -d @spec.json | python -c 'import sys, json; print(json.load(sys.stdin)["run_id"])')
+# …minutes later, even if the container restarted in between…
+curl -s localhost:8080/api/runs/$RID                 # status
+curl -sO  localhost:8080/api/runs/$RID/results       # download results CSV
+```
 
 ### Run spec
 

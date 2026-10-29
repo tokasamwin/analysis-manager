@@ -427,3 +427,185 @@ def test_config_non_tty_no_prompt():
 		cwd=os.path.join(os.path.dirname(os.path.dirname(__file__))),
 	)
 	assert result.returncode == 0, result.stderr
+
+# ---------------------------------------------------------------------------
+# durable outputs (run.json / results.csv / restart recovery)
+# ---------------------------------------------------------------------------
+
+def test_durable_success_files(client):
+	"""A successful run must leave run.json + results.csv on disk, and the
+	live results endpoint must match the durable file byte-for-byte."""
+	spec = _inlineSpec()
+	name = 'durable-ok-{}'.format(int(time.time() * 1000))
+	spec['name'] = name
+	rid = client.post('/api/runs', json=spec).get_json()['run_id']
+	state = _wait(client, rid)
+	assert state['status'] == 'succeeded', state
+
+	from pathlib import Path
+	import json as jsonlib
+	base = Path(state['basePath'])
+	assert (base / 'run.json').is_file(), 'run.json missing'
+	record = jsonlib.loads((base / 'run.json').read_text())
+	assert record['status'] == 'succeeded'
+	assert record['run_id'] == rid
+	assert record['name'] == name
+	assert record['finished_at'] is not None
+	assert record['spec']['routines'], 'spec should be echoed'
+	assert (base / 'results.csv').is_file(), 'results.csv missing'
+
+	durableCsv = (base / 'results.csv').read_text()
+	liveCsv = client.get('/api/runs/{}/results'.format(rid)).get_data(as_text=True)
+	assert liveCsv == durableCsv
+
+def test_durable_failed_run(client):
+	"""A failed run must persist failed status + error + traceback, and the
+	results endpoint must report the failure instead of hanging."""
+	spec = {
+		'name': 'durable-fail-{}'.format(int(time.time() * 1000)),
+		'workers': 'threads',
+		'stages': [
+			{
+				'name': 'boom',
+				'inputs': ['a'],
+				'function': {
+					'code': 'def f(a, **kwargs):\n'
+							'\traise RuntimeError("kaboom")',
+					'function': 'f',
+				},
+			},
+		],
+		'routines': [
+			{
+				'type': 'search',
+				'sampler': {'kind': 'basic', 'variables': {'a': [0, 1]}},
+				'density': 2,
+			},
+		],
+	}
+	rid = client.post('/api/runs', json=spec).get_json()['run_id']
+	state = _wait(client, rid)
+	assert state['status'] == 'failed', state
+	assert 'kaboom' in (state.get('error') or '')
+
+	from pathlib import Path
+	import json as jsonlib
+	base = Path(state['basePath'])
+	record = jsonlib.loads((base / 'run.json').read_text())
+	assert record['status'] == 'failed'
+	assert 'kaboom' in record['error']
+	assert record['traceback'] and 'RuntimeError' in record['traceback']
+
+	results = client.get('/api/runs/{}/results'.format(rid))
+	assert results.status_code == 500
+	body = results.get_json()
+	assert body['status'] == 'failed'
+	assert 'kaboom' in body['error']
+
+def test_durable_list_runs(client):
+	spec = _inlineSpec()
+	name = 'durable-list-{}'.format(int(time.time() * 1000))
+	spec['name'] = name
+	rid = client.post('/api/runs', json=spec).get_json()['run_id']
+	state = _wait(client, rid)
+	assert state['status'] == 'succeeded', state
+
+	resp = client.get('/api/runs')
+	assert resp.status_code == 200
+	body = resp.get_json()
+	names = [r['name'] for r in body['runs']]
+	assert name in names
+	byId = {r['run_id']: r for r in body['runs'] if 'run_id' in r}
+	found = [r for r in body['runs'] if r.get('name') == name]
+	assert found and found[0]['status'] == 'succeeded'
+	limit = client.get('/api/runs?limit=1').get_json()
+	assert len(limit['runs']) == 1
+
+def test_durable_remark_interrupted(tmp_path):
+	"""A run whose on-disk status is still running must be re-marked
+	interrupted by a re-index, with a clear error message."""
+	from pathlib import Path
+	import json as jsonlib
+	from analysisManager import durable
+
+	dataDir = tmp_path / 'datadir'
+	base = dataDir / 'int-run'
+	base.mkdir(parents=True)
+	(base / 'DP').mkdir()
+	(base / 'DP' / 'results.json').write_text('{}')
+
+	(base / 'run.json').write_text(jsonlib.dumps({
+		'run_id': 'int1', 'name': 'int-run', 'status': 'running',
+		'basePath': str(base), 'submitted_at': 1.0, 'started_at': 2.0,
+	}))
+	durable.reindexRuns(dataDir)
+	record = jsonlib.loads((base / 'run.json').read_text())
+	assert record['status'] == 'interrupted'
+	assert record['error']
+	assert record['finished_at'] is not None
+	# the completed design point is still there
+	assert durable.readResultsCsv(base) is None
+	assert (base / 'DP' / 'results.json').is_file()
+
+def test_durable_load_run_from_disk(tmp_path):
+	from analysisManager import durable
+	dataDir = tmp_path / 'dd2'
+	base = dataDir / 'runx'
+	base.mkdir(parents=True)
+	rec = durable.RunRecord(
+		run_id='id-xyz', name='runx', status='succeeded', basePath=str(base),
+		submitted_at=1, started_at=2, finished_at=3,
+	)
+	durable.writeRunJson(base, rec)
+	assert durable.loadRunFromDisk(dataDir, 'runx').run_id == 'id-xyz'
+	assert durable.loadRunFromDisk(dataDir, 'id-xyz').name == 'runx'
+	assert durable.loadRunFromDisk(dataDir, 'nope') is None
+	assert durable.listRuns(dataDir)[0]['run_id'] == 'id-xyz'
+
+def test_restart_lookup_fallback(client):
+	"""After a 'restart' (a fresh app on the same data directory), a run that
+	is no longer in live memory must still be discoverable and its durable
+	results served from disk."""
+	from analysisManager import server as serverModule
+	spec = _inlineSpec()
+	name = 'restart-{}'.format(int(time.time() * 1000))
+	spec['name'] = name
+	rid = client.post('/api/runs', json=spec).get_json()['run_id']
+	state = _wait(client, rid)
+	assert state['status'] == 'succeeded', state
+
+	# simulate a restart: build a brand new app against the same DATA_DIR
+	restarted = serverModule.createApp()
+	restartedClient = restarted.test_client()
+	state2 = restartedClient.get('/api/runs/{}'.format(rid)).get_json()
+	assert state2['status'] == 'succeeded', state2
+	assert state2['name'] == name
+	# by name too
+	state3 = restartedClient.get('/api/runs/{}'.format(name)).get_json()
+	assert state3['run_id'] == rid
+
+	csvFromDisk = restartedClient.get('/api/runs/{}/results'.format(rid))
+	assert csvFromDisk.status_code == 200
+	body = csvFromDisk.get_data(as_text=True)
+	assert 'area' in body or 'volume' in body
+
+def test_restart_interrupted_listing():
+	from analysisManager.server import createApp
+	from analysisManager import server as serverModule
+	from analysisManager import durable
+	import json as jsonlib
+	# create a fake run left mid-flight, then bring a new app up
+	fakeName = 'left-running-{}'.format(int(time.time() * 1000))
+	base = serverModule.DATA_DIR / fakeName
+	base.mkdir(parents=True, exist_ok=True)
+	(base / 'run.json').write_text(jsonlib.dumps({
+		'run_id': 'left1',
+		'name': fakeName,
+		'status': 'running',
+		'basePath': str(base),
+		'submitted_at': 1,
+		'started_at': 2,
+	}))
+	createApp()  # triggers reindex
+	record = durable.loadRunFromDisk(serverModule.DATA_DIR, fakeName)
+	assert record.status == 'interrupted'

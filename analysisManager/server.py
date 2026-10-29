@@ -24,7 +24,6 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request, Response, send_file
 
@@ -44,6 +43,7 @@ from analysisManager import (
 from analysisManager.sampling import _methods as _samplingMethods
 
 from analysisManager.routineDashboard import routineDashboard
+from analysisManager import durable
 from analysisManager.stage_functions import (
 	resolveReference,
 	registry,
@@ -59,8 +59,61 @@ except ImportError:
 WORKERS_ENV = 'ANALYSIS_WORKERS'
 VALID_WORKER_MODES = {'none', 'threads', 'processes'}
 
+DATA_DIR = Path(am.config['path']['dataDir'])
+
 class SpecError(ValueError):
 	"""Raised when a run spec is invalid; reported to the client as HTTP 422."""
+
+def version() -> str:
+	try:
+		return importlib.metadata.version('analysis-manager')
+	except importlib.metadata.PackageNotFoundError:
+		return '0.1.0'
+
+def _record(run) -> 'durable.RunRecord':
+	'''Snapshot the live Run state into a durable run record.'''
+	return durable.RunRecord(
+		run_id=run.runID,
+		name=run.name,
+		status=run.status,
+		basePath=run.meta['basePath'],
+		spec=run.spec,
+		workers={
+			'mode': run.meta.get('workersMode'),
+			'count': run.meta.get('workerCount'),
+		},
+		submitted_at=run.submittedAt,
+		started_at=run.startedAt,
+		finished_at=run.finishedAt,
+		error=run.error,
+		traceback=run.meta.get('traceback'),
+		version=version(),
+		routines=list(run.routineStates),
+	)
+
+def _diskRunPublic(record: 'durable.RunRecord') -> dict:
+	'''Present a durable record in the same shape as ``Run.public()``.'''
+	completed = 0
+	basePath = Path(record.basePath)
+	if basePath.is_dir():
+		completed = len(list(basePath.glob('*/results.json')))
+	return {
+		'run_id': record.run_id,
+		'status': record.status,
+		'name': record.name,
+		'basePath': record.basePath,
+		'queue_position': None,
+		'error': record.error,
+		'submitted_at': record.submitted_at,
+		'started_at': record.started_at,
+		'finished_at': record.finished_at,
+		'version': record.version,
+		'spec': record.spec,
+		'progress': {
+			'completed_design_points': completed,
+			'routines': record.routines,
+		},
+	}
 
 # ---------------------------------------------------------------------------
 # spec -> objects
@@ -282,10 +335,11 @@ def specToManager(spec) -> tuple[runManager, dict]:
 class Run(object):
 	'''State for a single submitted run.'''
 
-	def __init__(self, runID: str, manager: runManager, meta: dict):
+	def __init__(self, runID: str, manager: runManager, meta: dict, spec: dict | None = None):
 		self.runID = runID
 		self.manager = manager
 		self.meta = dict(meta)
+		self.spec = spec
 		self.status = 'queued'
 		self.queuePosition = 0
 		self.error = None
@@ -344,25 +398,25 @@ def _resolveWorkers(run: Run, routine: object):
 # ---------------------------------------------------------------------------
 
 def createApp() -> Flask:
-	'''Build the Flask app and start the run worker thread on import.'''
+	'''Build the Flask app and start the run worker thread on import.
+
+	At build time the durable run records on disk are re-indexed; any run that
+	had not finished when the previous process exited is re-marked as
+	``interrupted`` so its on-disk state is honest.
+	'''
 	app = Flask(__name__)
 	app.config['JSON_SORT_KEYS'] = False
 
 	_runs: dict[str, Run] = {}
 	_queue: queue.Queue[str] = queue.Queue()
 	_lock = threading.Lock()
-
-	def _version() -> str:
-		try:
-			return importlib.metadata.version('analysis-manager')
-		except importlib.metadata.PackageNotFoundError:
-			return '0.1.0'
+	durable.reindexRuns(DATA_DIR)
 
 	@app.get('/health')
 	def health() -> Response:
 		return jsonify({
 			'status': 'ok',
-			'version': _version(),
+			'version': version(),
 			'queued': _queue.qsize(),
 			'runs': {
 				key: value.status for key, value in list(_runs.items())
@@ -371,10 +425,9 @@ def createApp() -> Flask:
 
 	@app.get('/api/config')
 	def apiConfig() -> Response:
-		dataDir = am.config['path']['dataDir'] if 'path' in am.config else None
 		return jsonify({
-			'version': _version(),
-			'dataDir': str(dataDir),
+			'version': version(),
+			'dataDir': str(DATA_DIR),
 			'registry': registry(),
 			'defaultWorkerMode': 'threads',
 			'defaultWorkerCount': os.environ.get(WORKERS_ENV, 4),
@@ -390,10 +443,11 @@ def createApp() -> Flask:
 		except (SpecError, StageFunctionError, ValueError, TypeError) as error:
 			return jsonify({'error': str(error)}), 422
 		runID = uuid.uuid4().hex[:12]
-		run = Run(runID, manager, meta)
+		run = Run(runID, manager, meta, spec)
 		run.queuePosition = _queue.qsize()
 		with _lock:
 			_runs[runID] = run
+		durable.markStatus(Path(meta['basePath']), _record(run))
 		_queue.put(runID)
 		return jsonify({
 			'run_id': runID,
@@ -407,42 +461,82 @@ def createApp() -> Flask:
 			},
 		}), 202
 
+	@app.get('/api/runs')
+	def listAllRuns() -> Response:
+		'''List runs, live first (running state wins) then durable ones from disk.'''
+		try:
+			limit = int(request.args.get('limit'))
+		except (TypeError, ValueError):
+			limit = None
+		byName = {record['name']: record for record in durable.listRuns(DATA_DIR)}
+		live = list(_runs.values())
+		for run in live:
+			byName.pop(run.name, None)
+			byName[run.name] = run.public()
+		ordered = sorted(byName.values(),
+			key=lambda record: (record.get('finished_at') is not None,
+				record.get('finished_at') or 0.0),
+			reverse=True)
+		if limit is not None:
+			ordered = ordered[:limit]
+		return jsonify({
+			'dataDir': str(DATA_DIR),
+			'runs': ordered,
+		})
+
 	@app.get('/api/runs/<runID>')
 	def getRun(runID: str) -> Response:
 		with _lock:
 			run = _runs.get(runID)
-		if run is None:
+		if run is not None:
+			return jsonify(run.public())
+		# not in live memory: fall back to the durable record on disk
+		record = durable.loadRunFromDisk(DATA_DIR, runID)
+		if record is None:
 			return jsonify({'error': 'Unknown run_id: {}'.format(runID)}), 404
-		return jsonify(run.public())
+		return jsonify(_diskRunPublic(record))
 
 	@app.get('/api/runs/<runID>/results')
 	def getResults(runID: str) -> Response:
 		with _lock:
 			run = _runs.get(runID)
-		if run is None:
-			return jsonify({'error': 'Unknown run_id: {}'.format(runID)}), 404
-		if run.status in ('queued', 'running'):
-			return jsonify({'status': run.status, 'error': 'run is not finished yet'}), 409
-		if run.status == 'failed':
-			return jsonify({'status': run.status, 'error': run.error}), 500
-		frame = run.manager.df.copy(deep=True)
-		for column in frame.columns:
-			if pd.api.types.is_numeric_dtype(frame[column]):
-				frame[column] = frame[column].where(np.isfinite(frame[column]))
-		wantFormat = (request.args.get('format') or 'csv').lower()
-		if wantFormat == 'json':
-			records = json.loads(frame.to_json(orient='records', force_ascii=False))
-			body = json.dumps({'name': run.name, 'run_id': runID,
-				'status': run.status, 'results': records}, indent=2)
+		if run is not None:
+			if run.status in ('queued', 'running'):
+				return jsonify({'status': run.status, 'error': 'run is not finished yet'}), 409
+			if run.status == 'failed':
+				return jsonify({'status': run.status, 'error': run.error,
+					'traceback': run.meta.get('traceback')}), 500
+			frame = run.manager.df
+			if (request.args.get('format') or 'csv').lower() == 'json':
+				records = json.loads(frame.to_json(orient='records', force_ascii=False))
+				body = json.dumps({'name': run.name, 'run_id': runID,
+					'status': run.status, 'results': records}, indent=2)
+				return Response(
+					body, mimetype='application/json',
+					headers={'Content-Disposition':
+						'attachment; filename="{}-results.json"'.format(run.name)})
 			return Response(
-				body, mimetype='application/json',
+				durable.resultsToCSV(frame),
+				mimetype='text/csv; charset=utf-8',
 				headers={'Content-Disposition':
-					'attachment; filename="{}-results.json"'.format(run.name)})
-		body = frame.to_csv()
+					'attachment; filename="{}-results.csv"'.format(run.name)})
+		# not in live memory: serve the durable record from disk
+		record = durable.loadRunFromDisk(DATA_DIR, runID)
+		if record is None:
+			return jsonify({'error': 'Unknown run_id: {}'.format(runID)}), 404
+		if record.status == 'failed':
+			return jsonify({'status': 'failed', 'error': record.error,
+				'traceback': record.traceback}), 500
+		body = durable.readResultsCsv(record.basePath)
+		if body is None:
+			return jsonify({
+				'status': record.status,
+				'error': 'no results file is stored for this run',
+			}), 404
 		return Response(
 			body, mimetype='text/csv; charset=utf-8',
 			headers={'Content-Disposition':
-				'attachment; filename="{}-results.csv"'.format(run.name)})
+				'attachment; filename="{}-results.csv"'.format(record.name)})
 
 	@app.get('/api/runs/<runID>/dashboard')
 	def getDashboard(runID: str) -> Response:
@@ -487,8 +581,10 @@ def createApp() -> Flask:
 				run = _runs.get(runID)
 			if run is None:
 				continue
+			runBase = Path(run.meta['basePath'])
 			run.status = 'running'
 			run.startedAt = time.time()
+			durable.markStatus(runBase, _record(run))
 			try:
 				for routine, state in zip(run.manager.routines, run.routineStates):
 					state['state'] = 'running'
@@ -497,6 +593,7 @@ def createApp() -> Flask:
 					finally:
 						if state['state'] != 'error':
 							state['state'] = 'done'
+					durable.markStatus(runBase, _record(run))
 				run.status = 'succeeded'
 			except Exception as error:
 				detail = traceback.format_exc()
@@ -511,6 +608,22 @@ def createApp() -> Flask:
 				run.meta['traceback'] = detail
 			finally:
 				run.finishedAt = time.time()
+				frame = getattr(run.manager, 'df', None)
+				if frame is not None and frame.empty:
+					frame = None
+				try:
+					durable.finalizeRun(runBase, _record(run), frame)
+				except Exception:
+					run.status = 'failed'
+					run.error = (
+						(run.error + ' | ' if run.error else '') +
+						'failed to write durable run record: ' +
+						traceback.format_exc_only().strip()
+					)
+					try:
+						durable.writeRunJson(runBase, _record(run))
+					except Exception:
+						pass
 
 	workerThread = threading.Thread(target=_worker, name='analysis-run-worker', daemon=True)
 	workerThread.start()
