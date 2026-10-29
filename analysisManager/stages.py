@@ -1,6 +1,8 @@
 from collections.abc import Callable
 from typing import Any, Literal
 
+from analysisManager.submitter import submitter
+
 def _basicGate(row) -> bool:
 	return True
 
@@ -24,7 +26,7 @@ class stage(object):
 	def name(self,value) -> None:
 		self._name=value
 
-	def __init__(self,function: Callable,inputs: list[str] | None=None,gate: Callable | None=None,name: str | None=None,outFile: str='statepoint*h5') -> None:
+	def __init__(self,function: Callable | submitter,inputs: list[str] | None=None,gate: Callable | None=None,name: str | None=None,outFile: str='statepoint*h5') -> None:
 		'''
 		Stages: progressive steps of a design point assessment.
 		inputs: a list of the names of the inputs to use when calling the function. These must match column names in the runManager.df DataFrame
@@ -47,10 +49,35 @@ class stage(object):
 			self.inputs: list[str]=inputs
 		else:
 			self.inputs=[]
-		self.function: Callable[..., Any]=function
+		self.function: Callable[..., Any] | submitter = function
 		self.outFile: str=outFile
-
+		self.worker: submitter | None=None
 	def __repr__(self) -> str:
 		representation = 'Stage {}'
 		if self.gateCheck: representation+=' with gate'
 		return representation
+
+	def _buildPayload(self,*inputs,config = None,**kwargs) -> dict[str,Any]:
+		if len(inputs)!=len(self.inputs) and self.inputs:
+			raise ValueError(f'Number of inputs provided ({len(inputs)}) does not match number of inputs expected ({len(self.inputs)})')
+		inputDict = {k:v for k,v in zip(self.inputs,inputs)}
+		inputDict.update(config)
+		submission = {
+			'config': inputDict,
+			'run_path': kwargs.pop('path'),
+			'kwargs': kwargs
+		}
+		return submission
+
+	def __call__(self,*inputs,config = None,**kwargs) -> dict[str,Any]:
+		if not config:
+			config = {}
+		if type(self.function) is submitter:
+			outFile = kwargs.pop('outFile',None)
+			if outFile:
+				outFile = str(outFile)
+			submission = self._buildPayload(*inputs,config=config,outFile=outFile,**kwargs)
+			result = self.function(submission)
+		else:
+			result = self.function(*inputs,**kwargs)
+		return result

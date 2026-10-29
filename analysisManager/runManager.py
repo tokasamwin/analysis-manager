@@ -73,7 +73,7 @@ class runManager(object):
 				localText = runText + ' | Stage {} of {} ({})'.format(n+1,len(self.stages),ID)
 				if self._verbose: print(localText)
 			if stage.gate(row):
-				result = stage.function(*args,path=nwd,outFile=outFile)
+				result = stage(*args,path=nwd,outFile=outFile,config = self.configuration)
 				result['pass'] = result.get('pass',stage.name)
 				row = row.to_dict()
 				row.update(result)

@@ -4,3 +4,4 @@ from .sampling import basicSampler, definedSampler, linearDistribution, exponent
 from .routines import searchRoutine, optimiseRoutine, surrogateRoutine
 from .stages import stage
 from .parallelCoordinatePlots import plotter
+from .submitter import submitter
