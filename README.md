@@ -54,113 +54,17 @@ These aspects are all implemented in a modular way. Get your workflow working wi
    |- Run configuration data
 ```
 
-## Web API & Docker
+Stages are wrappers around functions. These functions may be accessible within the local environment or a provided by a "submitter", which submits tasks to a web server endpoint.
 
-analysisManager can run as a web service: clients submit **run specs** (JSON) containing samplers, stages and routines, and the server executes them inside its process/container, one run at a time behind a FIFO queue.
+Local functions are assumed to take positional arguments (e.g., stage.function(*inputs)), while web server endpoints are provided with a dictionary payload (e.g., stage.function(payload)). This is handled by the stage._buildPayload method.
 
-```bash
-pip install .[server]          # base package + flask + gunicorn
-gunicorn analysisManager.server:app --bind 0.0.0.0:8080 --workers 1 --threads 8
-```
+The contract is:
+* **submit**: dict of {key:value} for inputs
+    * This is compiled from stage.config and the sampled input array/stage.inputs
+* **result**: dict of {key:value} for results
+    * This result dictionary is expanded into routine.df (and by extension, runManager.df)
 
-### Endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | liveness (queue/running state) |
-| `GET /api/config` | data dir, registry, version |
-| `POST /api/runs` | submit a run spec → `202 {run_id, ...}` |
-| `GET /api/runs` | list runs (live state wins over disk), `?limit=` |
-| `GET /api/runs/{id}` | status, per-routine progress, design points completed |
-| `GET /api/runs/{id}/results?format=csv\|json` | the accumulated results DataFrame |
-| `GET /api/runs/{id}/dashboard` | self-refreshing HTML dashboard |
-| `DELETE /api/runs/{id}` | cancel — not implemented yet (`501`) |
-
-### Durable outputs
-
-Each run leaves a durable record in `dataDir/<run name>/` so results survive server restarts:
-
-```
-dataDir/<run name>/
-├── run.json            run status & metadata (written at queued → running → finished)
-│     {run_id, name, status, spec, workers, timestamps, error, traceback,
-│      version, routines: [{name, state}]}
-├── results.csv         joined results table (identical bytes to the live endpoint)
-├── config-<hash>.json  run configuration (library)
-└── <ID>/               one folder per design point
-    ├── inputs.json
-    ├── results.json    written only if all stages passed
-    └── <stage>/…       your stage functions' artifacts
-```
-
-Status values: `queued`, `running`, `succeeded`, `failed`, `interrupted`. At server start, any run still marked `queued`/`running` on disk is re-marked `interrupted` (its per-design-point artifacts are preserved; the joined table was in memory and is lost).
-
-Because the **run name** is the disk folder name, it is the stable key across restarts — `GET /api/runs/{name}` and `GET /api/runs/{run_id}` both resolve from disk. Fire-and-forget workflow:
-
-```bash
-RID=$(curl -s -X POST localhost:8080/api/runs -H 'Content-Type: application/json' \
-      -d @spec.json | python -c 'import sys, json; print(json.load(sys.stdin)["run_id"])')
-# …minutes later, even if the container restarted in between…
-curl -s localhost:8080/api/runs/$RID                 # status
-curl -sO  localhost:8080/api/runs/$RID/results       # download results CSV
-```
-
-### Run spec
-
-```json
-{
-  "name": "example",
-  "workers": "threads",
-  "stages": [
-    {"name": "area",
-     "inputs": ["depth", "width"],
-     "function": {"code": "def f(depth, width, **kwargs):\n\treturn {'area': depth * width}", "function": "f"},
-     "gate": {"code": "lambda row: row.get('area', 0) > 5"}}
-  ],
-  "routines": [
-    {"type": "search",
-     "sampler": {"kind": "basic", "variables": {"depth": [1, 10], "width": [2, 5]}},
-     "density": 5},
-    {"type": "optimise",
-     "sampler": {"kind": "basic", "variables": {"depth": [1, 10], "width": [2, 5]}},
-     "target": {"code": "lambda row: -row.get('volume', 1e6)"},
-     "pop_size": 20, "n_gen": 20}
-  ]
-}
-```
-
-See `examples/api_client_example.py` for a ready-made client.
-
-### Stage functions across the wire
-
-Every callable slot (`function`, `gate`, `target`, surrogate `model`) takes one of:
-
-* `{"name": "package.module.function"}` or `{"name": "registry-alias"}` — a real importable function, resolved through the **registry** (a JSON file of aliases → dotted paths, from the `ANALYSIS_STAGE_REGISTRY` env var; see `docker/registry.example.json`).
-* `{"code": "lambda row: ...", "function": "optional_name"}` — inline Python, executed in a restricted namespace (`np`, `pd`, `math`, `inf` available; imports and `os`/`subprocess`/`open` and friends are blocked).
-
-**Worker modes** (`"workers"`):
-
-| Mode | Registry functions | Inline code | Notes |
-|---|---|---|---|
-| `none` (default: `threads`) | ✅ | ✅ | sequential |
-| `threads` | ✅ | ✅ | in-process thread pool; best when stages wrap external binaries (the common HPC pattern) |
-| `processes` | ✅ | ❌ → `422` | parallel worker processes; inline code cannot be pickled into fresh processes |
-
-### Environment variables
-
-| Variable | Meaning |
-|---|---|
-| `ANALYSISMANAGER_DATADIR` | data directory for run outputs (no interactive prompt when set) |
-| `ANALYSIS_STAGE_REGISTRY` | path to the stage-function registry JSON file |
-| `ANALYSIS_WORKERS` | default `workerCount` for `threads`/`processes` modes |
-
-### Docker
-
-```bash
-docker compose up --build
-```
-
-mounts `./data` to `/data` for results, an optional registry file at `/etc/analysis/registry.json`, and exposes port `8080`. Bake any analysis tools your stage functions need into the image (extend the `builder` stage of `Dockerfile`).
+This approach means analysisManager can be used to gather results from different environments, including other analytical software not using python
 
 ## Contributing
 
