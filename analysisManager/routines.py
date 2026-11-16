@@ -222,6 +222,7 @@ class GAProblem(ElementwiseProblem):
 		self.targetFunction = targetFunction
 		self.configuration = configuration
 		self._evaluationsRows = []
+		self._index = 1
 
 	def _evaluate(
 		self,
@@ -234,8 +235,9 @@ class GAProblem(ElementwiseProblem):
 		row["ID"] = hashRow(row, **self.configuration)
 		result = self.runFunction(
 			pd.Series(row), 
-			runText="{} Objective Optimisation: ".format(self.nObj)
+			runText="{} Objective Optimisation: Point {}".format(self.nObj, self._index)
 		)
+		self._index += 1
 		row.update(result)
 		self._evaluationsRows.append(row.copy())
 		out["F"] = self.targetFunction(row)
@@ -329,7 +331,8 @@ class optimiseRoutine(routine):
 		else:
 			survival = survival()
 		seed=kwargs.get('seed',1)
-
+		def text_template(index: int, count: int) -> str:
+			return 'Search: running {} of {}'.format(index + 1, count)
 		sampling = self.routineConfiguration.get('sampling',MixedVariableSampling())
 		self.algorithm = algorithm(
 			pop_size = self.routineConfiguration.get('pop_size',20),
