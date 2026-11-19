@@ -131,7 +131,7 @@ class submitter(object):
 		if 'outFile' in payload['kwargs']:
 			outFile = payload['kwargs'].get('outFile')
 			if outFile:
-				payload['kwargs']['outFile'] = self._mapDirectories(outFile)
+				payload['kwargs']['outFile'] = outFile.split('/')[-1] #self._mapDirectories(outFile)
 		submission = self._submit(payload)
 		status = submission.get('status')
 		if status == 'complete':
