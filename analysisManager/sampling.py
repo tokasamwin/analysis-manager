@@ -90,8 +90,9 @@ def _inflateParameterGrid(subdivisions: int,line: list) -> list:
 	return results
 
 class _distribution(object):
-	def __init__(self):
+	def __init__(self,label=None):
 		self._index=0
+		self._label=label
 
 	def __iter__(self):
 		return iter(self.vals)
@@ -104,8 +105,8 @@ class _distribution(object):
 		return value
 
 class setDistribution(_distribution):
-	def __init__(self,vals: Iterable):
-		super().__init__()
+	def __init__(self,vals: Iterable,label: str | None =None):
+		super().__init__(label=label)
 		self.vals=vals
 	
 	def __len__(self):
@@ -115,9 +116,10 @@ class linearDistribution(_distribution):
 	def __init__(
 		self,
 		limits: tuple[float,float],
-		density: int = 5
+		density: int = 5,
+		label: str | None = None
 		):
-		super().__init__()
+		super().__init__(label=label)
 		self.limits=limits
 		self.vals=list(np.linspace(*limits,num=density))
 
@@ -129,9 +131,10 @@ class exponentialDistribution(_distribution):
 		self,
 		limits: tuple[float,float],
 		density: int = 5,
-		base: float = 10
+		base: float = 10,
+		label: str | None = None,
 		):
-		super().__init__()
+		super().__init__(label=label)
 		self._base=base
 		self.limits=limits
 		self._loglimits=[np.log(val)/np.log(base) for val in limits]
@@ -149,6 +152,9 @@ discreteClasses=(setDistribution,)
 class definedSampler(object):
 	def __init__(self,**variables: dict[str,_distribution]):
 		self.variables=variables
+		self.lookup = {}
+		for var in variables:
+			self.lookup[var] = variables[var]._label if variables[var]._label else var
 		errantVariables=list(filter(lambda i: type(variables[i]) not in allowedClasses,variables))
 		if len(errantVariables):
 			errorString='Following variables are not in the allowed class types: '
@@ -184,7 +190,11 @@ class definedSampler(object):
 		if density==1:
 			continuousSamples=[{name:self.variables[name](0.5) for name in self.continuousVariableNames}] # median value in the range
 		elif iterableCheck(density):
-			if len(density)!=len(self.continuousVariableNames): raise AttributeError('Incorrect density shape')
+			if len(density)!=len(self.continuousVariableNames): 
+				errorMsg = 'Incorrect density shape, must have same length as continuous variables'
+				errorMsg+= '\n\tCurrent length: {}'.format(len(density))
+				errorMsg+= '\n\tCorrect length: {}'.format(len(self.continuousVariableNames))
+				raise AttributeError(errorMsg)
 			axes=[]
 			for val in density:
 				if val==1:
@@ -193,7 +203,6 @@ class definedSampler(object):
 					axes.append(np.linspace(0,1,val))
 			varRanges=[[self.variables[name](val) for val in axis] for name,axis in zip(self.continuousVariableNames,axes)]
 			grids=np.meshgrid(*varRanges,indexing='ij') #permutate the ranges
-			#
 			continuousSamples=np.array([grid.flatten() for grid in grids]).T.tolist()
 			continuousSamples=[{name:value for name,value in zip(self.continuousVariableNames,values)} for values in continuousSamples]
 		else:
@@ -211,9 +220,10 @@ class definedSampler(object):
 		points=getattr(self,method)(density)
 		return points
 	
-	def getDF(self,density: int | Iterable = 5, method: str = 'grid') -> df:
-		return df(self.getPoints(density=density,method=method))
-
+	def getDF(self,density: int | Iterable = 5, method: str = 'grid',alias: bool = True) -> df:
+		result = df(self.getPoints(density=density,method=method))
+		if alias: result = result.rename(self.lookup,axis=1)
+		return result
 	
 	def _permutate(self,continuousSamples: list) -> list:
 		if not(self.discreteSamples): return continuousSamples
