@@ -11,8 +11,10 @@ DataFrame and can use either a worker count or an executor for parallel runs.
 from analysisManager.utils import hashRow
 from analysisManager.sampling import definedSampler
 from copy import deepcopy
+from inspect import signature as _signature
 from scipy.interpolate import RBFInterpolator
 from pymoo.core.problem import ElementwiseProblem
+from pymoo.core.problem import Problem as _MooProblem
 from pymoo.core import variable as mooVars
 from pymoo.core.population import Population
 from pymoo.algorithms.moo.nsga2 import NSGA2, RankAndCrowdingSurvival
@@ -22,6 +24,13 @@ from pymoo.optimize import minimize as minimise
 from pymoo.core.mixed import MixedVariableSampling
 from pymoo.core.mixed import MixedVariableMating
 from pymoo.core.mixed import MixedVariableDuplicateElimination
+# pymoo renamed the inequality-constraint count from ``n_con`` to
+# ``n_ieq_constr`` in v0.6; resolve the name so either release is supported.
+_MOO_IEQ_KWARG = (
+	'n_ieq_constr'
+	if 'n_ieq_constr' in _signature(_MooProblem.__init__).parameters
+	else 'n_con'
+)
 import pandas as pd, numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from collections.abc import Callable as _Callable, Hashable as _Hashable, Sequence as _Sequence
@@ -205,7 +214,9 @@ class GAProblem(ElementwiseProblem):
 
 	The class hashes each candidate, runs the evaluation function, records
 	evaluated rows, and passes the target function's output to pymoo as the
-	objective vector.
+	objective vector. Optional constraint callables are evaluated on the same
+	row and passed to pymoo as inequality-constraint values, where a value of
+	zero or below marks the constraint as satisfied.
 	"""
 
 	def __init__(
@@ -215,13 +226,31 @@ class GAProblem(ElementwiseProblem):
 		runFunction: _Callable[..., dict[str, _Any]],
 		targetFunction: _Callable[[dict[str, _Any]], _Any],
 		configuration: dict[str, _Any],
+		constraints: _Optional[_Sequence[_Callable[[dict[str, _Any]], _Any]]] = None,
 	) -> None:
-		super().__init__(vars=variables, n_obj=nObj)
+		self.constraints = list(constraints) if constraints else []
+		superKwargs: dict[str, _Any] = {'vars': variables, 'n_obj': nObj}
+		if self.constraints:
+			superKwargs[_MOO_IEQ_KWARG] = len(self.constraints)
+		super().__init__(**superKwargs)
 		self.nObj = nObj
 		self.runFunction = runFunction
 		self.targetFunction = targetFunction
 		self.configuration = configuration
 		self._evaluationsRows = []
+		self._index = 1
+
+	@staticmethod
+	def _violation(value: _Any) -> float:
+		"""Normalise a constraint result to pymoo's ``g <= 0`` format.
+
+		Float-like values pass through as constraint-violation magnitudes
+		(negative or zero values are feasible). Boolean results, in the style
+		of stage gate checks, map to ``-1`` (satisfied) or ``+1`` (violated).
+		"""
+		if isinstance(value,(bool,np.bool_)):
+			return -1.0 if value else 1.0
+		return float(value)
 
 	def _evaluate(
 		self,
@@ -234,9 +263,14 @@ class GAProblem(ElementwiseProblem):
 		row["ID"] = hashRow(row, **self.configuration)
 		result = self.runFunction(
 			pd.Series(row), 
-			runText="{} Objective Optimisation: ".format(self.nObj)
+			runText="{} Objective Optimisation: Point {}".format(self.nObj, self._index)
 		)
+		self._index += 1
 		row.update(result)
+		if self.constraints:
+			out["G"] = [self._violation(c(row)) for c in self.constraints]
+			for i,violation in enumerate(out["G"]):
+				row["G_{}".format(i)] = violation
 		self._evaluationsRows.append(row.copy())
 		out["F"] = self.targetFunction(row)
 
@@ -254,7 +288,10 @@ class optimiseRoutine(routine):
 		The target function receives each evaluated row as a dictionary and
 		returns one objective value or a sequence of objective values. pymoo
 		minimises objectives, so negate values that should be maximised. Rows
-		evaluated by the optimiser are stored in ``df``.
+		evaluated by the optimiser are stored in ``df``. When ``constraints``
+		are configured, each candidate is checked against them and
+		constraint-violating candidates are ranked below feasible ones during
+		selection.
 
 		Args:
 			sampler: Sampler defining the optimisation variables and bounds.
@@ -265,7 +302,33 @@ class optimiseRoutine(routine):
 			configuration: Optional settings used when hashing evaluated
 				points.
 			**kwargs: Optimiser options such as ``algorithm``, ``pop_size``,
-				``n_offsprings``, ``n_gen``, ``sampling``, and ``termination``.
+				``n_offsprings``, ``n_gen``, ``sampling``, ``termination``,
+				and ``constraints``.
+
+			``constraints``
+				Optional list of callables, each receiving the evaluated row
+				as a dictionary (including stage result columns) and
+				returning either:
+
+				- a float-like violation value ``g`` where ``g <= 0``
+				  satisfies the constraint, or
+				- a boolean, in the style of stage gate checks, where
+				  ``True`` satisfies the constraint.
+
+				Each value is stored in the result DataFrame as a column named
+				``G_0``, ``G_1``, ... in list order. As with
+				``targetFunction``, use ``row.get(key, default)`` so that a
+				missing result column produces the intended feasibility
+				instead of an error. Example::
+
+					optimiseRoutine(
+						sampler,
+						targetFunction=targetFunction,
+						constraints=[
+							lambda row: row.get("area", 0) - 50,        # area <= 50
+							lambda row: row.get("area", -np.inf) < 50,  # boolean form
+						],
+					)
 
 		Example:
 			Negate a metric to maximise it while retaining its original value
@@ -312,13 +375,18 @@ class optimiseRoutine(routine):
 			A DataFrame containing the evaluated candidates and their results.
 		"""
 		self.routineConfiguration.update(kwargs)
+		constraints = self.routineConfiguration.get('constraints',None)
 		self.problem = GAProblem(
 			variables = self.variables,
 			runFunction = function,
 			targetFunction = self.targetFunction,
 			configuration=self.configuration,
-			nObj=self.nObj
+			nObj=self.nObj,
+			constraints = constraints
 			)
+		self.constraintColumns = [
+			'G_{}'.format(i) for i in range(len(self.problem.constraints))
+		]
 		algorithm = self.routineConfiguration.get('algorithm',NSGA2)
 		survival = self.routineConfiguration.get('survival',None)
 		if not(survival):
@@ -329,7 +397,8 @@ class optimiseRoutine(routine):
 		else:
 			survival = survival()
 		seed=kwargs.get('seed',1)
-
+		def text_template(index: int, count: int) -> str:
+			return 'Search: running {} of {}'.format(index + 1, count)
 		sampling = self.routineConfiguration.get('sampling',MixedVariableSampling())
 		self.algorithm = algorithm(
 			pop_size = self.routineConfiguration.get('pop_size',20),
@@ -356,6 +425,27 @@ class optimiseRoutine(routine):
 			)
 		self.df = pd.DataFrame(self.problem._evaluationsRows)
 		return self.df
+
+	def getFeasibleResults(self) -> pd.DataFrame:
+		"""Return evaluated candidates that satisfy all configured constraints.
+
+		Returns:
+			The subset of ``df`` whose stored constraint columns (``G_0``,
+			``G_1``, ...) are all negative or zero. When no constraints were
+			configured, ``df`` is returned unchanged after a run.
+
+		Raises:
+			AttributeError: If the routine has not been run yet.
+		"""
+		if not(hasattr(self,'df')):
+			raise AttributeError('No DataFrame found')
+		gColumns: list[str] = [
+			column for column in getattr(self,'constraintColumns',[])
+			if column in self.df.columns
+		]
+		if not(gColumns):
+			return self.df
+		return self.df[self.df[gColumns].le(0).all(axis=1)]
 
 class surrogateRoutine(routine):
 	"""Evaluate sampler points and fit a surrogate to named result columns.
